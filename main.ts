@@ -11,6 +11,9 @@
 // entry is hit. One entry per run: after it exits it stays in cash, because
 // re-entering into chop is what bleeds a 1-minute bot dry.
 //
+// If the market refuses the entry (slippage cap, missing bar) the bot retries
+// while the signal still holds — a rejected buy must not strand it in cash.
+//
 // Backtested on the published dev window (1,440 one-minute cbBTC bars, the
 // 24 hours ending at the competition opening): net PnL +$23.64 on $1,000
 // starting cash, 2 trades, max drawdown 1.81%. The same rules on the window
@@ -61,7 +64,8 @@ const closes: number[] = [];
 const ema100 = new Ema(ENTRY_EMA_SPAN);
 const ema200 = new Ema(EXIT_EMA_SPAN);
 let confirmBars = 0;
-let entered = false; // a buy order has been sent (one entry per run)
+let bought = false; // the one entry has filled (one entry per run)
+let buySent = false; // a buy order is out and not yet filled
 let exiting = false; // a sell order is out and not yet filled
 let peakSinceEntry = 0; // highest close seen while holding
 let belowEma200 = 0; // consecutive closes under the 200-bar EMA while holding
@@ -88,6 +92,10 @@ await runBars({
     if (state.warmingUp) return [];
 
     const held = state.positions.get(SYMBOL);
+    if (held !== undefined && held.qty > 0n) bought = true;
+    // A buy the market refused (slippage cap, no bar) leaves no position:
+    // clear the flag so the entry is retried while the signal still holds.
+    if (buySent && (held === undefined || held.qty === 0n)) buySent = false;
     const close = closes.length > 0 ? closes[closes.length - 1] : null;
 
     // --- holding: watch the exits -------------------------------------
@@ -113,7 +121,7 @@ await runBars({
     if (exiting) exiting = false; // position is gone; the sell filled
 
     // --- flat: watch the entry ----------------------------------------
-    if (entered || close === null) return [];
+    if (bought || buySent || close === null) return [];
     if (closes.length <= ENTRY_EMA_SPAN) return []; // need a real 100-bar EMA
     const r30 = returnBps(ENTRY_WINDOW);
     const aboveEma = ema100.value !== null && close > ema100.value;
@@ -123,7 +131,7 @@ await runBars({
       confirmBars = 0;
     }
     if (confirmBars >= ENTRY_CONFIRM_BARS && state.cash > 0n) {
-      entered = true;
+      buySent = true;
       peakSinceEntry = close;
       return [{ side: 'buy', symbol: SYMBOL, notional_quote_units: state.cash, max_slippage_bps: MAX_SLIPPAGE_BPS }];
     }
